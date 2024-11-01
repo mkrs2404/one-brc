@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"runtime/pprof"
 	"sort"
@@ -30,31 +30,61 @@ func main() {
 
 	// start := time.Now()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 32*1024), 1024*1024)
 	var byteLine []byte
 	cityWeatherMap := make(map[string]*Calculation, 1024)
-	var orderedCities []string
+	orderedCities := make([]string, 0, 1024)
 	var cityStr string
-	for scanner.Scan() {
-		byteLine = scanner.Bytes()
-		city, temp := parseBytes(byteLine)
 
-		cityStr = string(city)
-		calc, ok := cityWeatherMap[cityStr]
-		if !ok {
-			calc = &Calculation{Min: temp, Max: temp, Total: temp, Count: 1}
-			cityWeatherMap[cityStr] = calc
-			orderedCities = append(orderedCities, cityStr)
-		} else {
-			if temp < calc.Min {
-				calc.Min = temp
+	bufSize := 64 * 1024
+	fileBuffer := make([]byte, bufSize)
+	leftover := []byte{}
+
+	for {
+		bytesRead, err := f.Read(fileBuffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+
+		chunk := append(leftover, fileBuffer[:bytesRead]...)
+		lastNewLine := bytes.LastIndexByte(chunk, '\n')
+		if lastNewLine == -1 {
+			leftover = chunk
+			continue
+		}
+
+		// Process lines up to the last newline
+		byteLines := chunk[:lastNewLine+1]
+		leftover = chunk[lastNewLine+1:]
+
+		// Process each line
+		start := 0
+		for i := 0; i < len(byteLines); i++ {
+			if byteLines[i] == 10 { // newline found
+				byteLine = byteLines[start:i]
+				start = i + 1
+
+				index, temp := parseBytes(byteLine)
+
+				cityStr = string(byteLine[:index])
+				calc, ok := cityWeatherMap[cityStr]
+				if !ok {
+					calc = &Calculation{Min: temp, Max: temp, Total: temp, Count: 1}
+					cityWeatherMap[cityStr] = calc
+					orderedCities = append(orderedCities, cityStr)
+				} else {
+					if temp < calc.Min {
+						calc.Min = temp
+					}
+					if temp > calc.Max {
+						calc.Max = temp
+					}
+					calc.Total += temp
+					calc.Count++
+				}
 			}
-			if temp > calc.Max {
-				calc.Max = temp
-			}
-			calc.Total += temp
-			calc.Count++
 		}
 	}
 
@@ -70,25 +100,40 @@ func main() {
 	memFile.Close()
 }
 
-func parseBytes(line []byte) ([]byte, int) {
-	ind := bytes.IndexByte(line, ';')
-	city := line[:ind]
+func parseBytes(line []byte) (int, int) {
+	var ind int
+	for i, v := range line {
+		if v == ';' {
+			ind = i
+			break
+		}
+	}
+
+	cityInd := ind
 	isNeg := false
 	if line[ind+1] == '-' {
 		ind++
 		isNeg = true
 	}
 
-	splitLine := line[ind+1:]
-	dp := bytes.IndexByte(splitLine, '.')
+	temp := line[ind+1:]
+	var dp int
+	for i, v := range temp {
+		if v == '.' {
+			dp = i
+			break
+		}
+	}
 
-	result := int(splitLine[0] - '0')
+	result := int(temp[0] - '0')
 	for i := 1; i < dp; i++ {
 		result = (result << 3) + (result << 1)
-		result += int(splitLine[i] - '0')
+		result += int(temp[i] - '0')
 	}
+
+	finalTemp := ((result << 3) + (result << 1) + int(temp[dp+1]-'0'))
 	if isNeg {
-		return city, -((result << 3) + (result << 1) + int(splitLine[dp+1]-'0'))
+		finalTemp = -finalTemp
 	}
-	return city, (result << 3) + (result << 1) + int(splitLine[dp+1]-'0')
+	return cityInd, finalTemp
 }
