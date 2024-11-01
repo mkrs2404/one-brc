@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"sync"
@@ -29,13 +30,59 @@ func main() {
 	}
 	defer f.Close()
 
-	// start := time.Now()
+	numWorkers := runtime.NumCPU()
+
 	wg := &sync.WaitGroup{}
 	byteLinesChan := make(chan []byte, 1024)
-	wg.Add(1)
-	go processData(byteLinesChan, wg)
+	tempChan := make(chan map[string]*Calculation, 1024)
 
-	bufSize := 64 * 1024
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go processData(byteLinesChan, tempChan, wg)
+	}
+
+	go func() {
+		wg.Wait()
+		close(tempChan)
+	}()
+
+	var readWg sync.WaitGroup
+	readWg.Add(1)
+
+	// Collect the results
+	go func() {
+		defer readWg.Done()
+		cityWeatherMap := make(map[string]*Calculation, 512)
+		orderedCities := make([]string, 0, 512)
+
+		for cityWeather := range tempChan {
+			for city, incomingCalc := range cityWeather {
+				calc, ok := cityWeatherMap[city]
+				if !ok {
+					cityWeatherMap[city] = incomingCalc
+					orderedCities = append(orderedCities, city)
+				} else {
+					if incomingCalc.Min < calc.Min {
+						calc.Min = incomingCalc.Min
+					}
+					if incomingCalc.Max > calc.Max {
+						calc.Max = incomingCalc.Max
+					}
+					calc.Total += incomingCalc.Total
+					calc.Count += incomingCalc.Count
+				}
+			}
+		}
+
+		sort.Strings(orderedCities)
+		for _, city := range orderedCities {
+			calc := cityWeatherMap[city]
+			avg := calc.Total / calc.Count
+			fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, float32(calc.Min)/10, float32(avg)/10, float32(calc.Max)/10)
+		}
+	}()
+
+	bufSize := 512 * 1024
 	fileBuffer := make([]byte, bufSize)
 	leftover := []byte{}
 
@@ -65,19 +112,21 @@ func main() {
 	close(byteLinesChan)
 
 	wg.Wait()
+	readWg.Wait()
 	memFile, _ := os.Create("mem.prof")
 	pprof.WriteHeapProfile(memFile)
 	memFile.Close()
 }
 
-func processData(byteChan <-chan []byte, wg *sync.WaitGroup) {
+func processData(byteChan <-chan []byte, tempChan chan<- map[string]*Calculation, wg *sync.WaitGroup) {
 	defer wg.Done()
-	cityWeatherMap := make(map[string]*Calculation, 1024)
-	orderedCities := make([]string, 0, 1024)
-	var byteLine []byte
-	var cityStr string
 
 	for byteLines := range byteChan {
+		orderedCities := make([]string, 0, 1024)
+		cityWeatherMap := make(map[string]*Calculation, 1024)
+		var byteLine []byte
+		var cityStr string
+
 		// Process each line
 		start := 0
 		for i := 0; i < len(byteLines); i++ {
@@ -105,14 +154,7 @@ func processData(byteChan <-chan []byte, wg *sync.WaitGroup) {
 				}
 			}
 		}
-	}
-
-	sort.Strings(orderedCities)
-
-	for _, city := range orderedCities {
-		calc := cityWeatherMap[city]
-		avg := calc.Total / calc.Count
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, float32(calc.Min)/10, float32(avg)/10, float32(calc.Max)/10)
+		tempChan <- cityWeatherMap
 	}
 }
 
@@ -153,12 +195,3 @@ func parseBytes(line []byte) (int, int) {
 	}
 	return cityInd, finalTemp
 }
-
-// func printResults(cityWeatherMap map[string]*Calculation, orderedCities []string) {
-// 	sort.Strings(orderedCities)
-// 	for _, city := range orderedCities {
-// 		calc := cityWeatherMap[city]
-// 		avg := calc.Total / calc.Count
-// 		fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, float32(calc.Min)/10, float32(avg)/10, float32(calc.Max)/10)
-// 	}
-// }
