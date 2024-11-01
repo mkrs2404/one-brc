@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"runtime/pprof"
 	"time"
@@ -23,8 +24,9 @@ func main() {
 	// Read the file using bufio.Scanner
 	start := time.Now()
 	// readScannerStr(f)
-	readScannerBytes(f)
-	fmt.Println("Read using bufio.Scanner took :", time.Since(start).Milliseconds())
+	// readScannerBytes(f)
+	readByFileReader(f)
+	fmt.Println("Read using file reader took :", time.Since(start).Milliseconds())
 	memFile, _ := os.Create("mem.prof")
 	pprof.WriteHeapProfile(memFile)
 	memFile.Close()
@@ -52,4 +54,17 @@ func readScannerBytes(f *os.File) {
 		byteLine = scanner.Bytes()
 	}
 	_ = byteLine
+}
+
+func readByFileReader(f *os.File) {
+	buffer := make([]byte, 2048*2048)
+	for {
+		_, err := f.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+	}
 }
