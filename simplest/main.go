@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"runtime/pprof"
-
 	"os"
 	"sort"
 	"strconv"
@@ -19,10 +17,6 @@ type Calculation struct {
 }
 
 func main() {
-	f, _ := os.Create("cpu.prof")
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
-
 	filePath := "../measurements.txt"
 
 	f, err := os.Open(filePath)
@@ -35,8 +29,6 @@ func main() {
 	orderedCities := make([]string, 0, 1024)
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
 	for scanner.Scan() {
 		line := scanner.Text()
 		splitData := strings.Split(line, ";")
@@ -78,8 +70,4 @@ func main() {
 		avg := calc.Total / float32(calc.Count)
 		fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, calc.Min, avg, calc.Max)
 	}
-
-	memFile, _ := os.Create("mem.prof")
-	pprof.WriteHeapProfile(memFile)
-	f.Close()
 }
