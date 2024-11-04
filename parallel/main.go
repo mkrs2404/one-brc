@@ -9,6 +9,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"sync"
+	"unsafe"
 )
 
 type Calculation struct {
@@ -22,7 +23,6 @@ func main() {
 	f, _ := os.Create("cpu.prof")
 	pprof.StartCPUProfile(f)
 	defer pprof.StopCPUProfile()
-
 	filePath := "../measurements.txt"
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -32,35 +32,36 @@ func main() {
 
 	numWorkers := runtime.NumCPU()
 
-	wg := &sync.WaitGroup{}
-	byteLinesChan := make(chan []byte, 1024)
-	tempChan := make(chan map[string]*Calculation, 1024)
+	// Larger buffer sizes for channels to reduce contention
+	byteLinesChan := make(chan []byte, numWorkers*2)
+	collectorChan := make(chan map[string]*Calculation, numWorkers*2)
 
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	// Start workers
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go processData(byteLinesChan, tempChan, wg)
+		go processData(byteLinesChan, collectorChan, &wg)
 	}
 
-	go func() {
-		wg.Wait()
-		close(tempChan)
-	}()
-
+	// Collector goroutine
 	var readWg sync.WaitGroup
 	readWg.Add(1)
 
-	// Collect the results
 	go func() {
 		defer readWg.Done()
-		cityWeatherMap := make(map[string]*Calculation, 512)
+		results := make(map[string]*Calculation, 512)
 		orderedCities := make([]string, 0, 512)
+		citiesMap := make(map[string]struct{}, 512)
 
-		for cityWeather := range tempChan {
+		for cityWeather := range collectorChan {
 			for city, incomingCalc := range cityWeather {
-				calc, ok := cityWeatherMap[city]
-				if !ok {
-					cityWeatherMap[city] = incomingCalc
-					orderedCities = append(orderedCities, city)
+				if calc, ok := results[city]; !ok {
+					results[city] = incomingCalc
+					if _, exists := citiesMap[city]; !exists {
+						orderedCities = append(orderedCities, city)
+						citiesMap[city] = struct{}{}
+					}
 				} else {
 					if incomingCalc.Min < calc.Min {
 						calc.Min = incomingCalc.Min
@@ -74,20 +75,21 @@ func main() {
 			}
 		}
 
+		// Output results
 		sort.Strings(orderedCities)
 		for _, city := range orderedCities {
-			calc := cityWeatherMap[city]
-			avg := calc.Total / calc.Count
-			fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, float32(calc.Min)/10, float32(avg)/10, float32(calc.Max)/10)
+			calc := results[city]
+			avg := float32(calc.Total) / float32(calc.Count)
+			fmt.Printf("%s=%.1f/%.1f/%.1f, ", city, float32(calc.Min)/10, avg/10, float32(calc.Max)/10)
 		}
 	}()
 
-	bufSize := 512 * 1024
-	fileBuffer := make([]byte, bufSize)
-	leftover := []byte{}
+	const bufSize = 1024 * 1024
+	buf := make([]byte, bufSize)
+	leftover := make([]byte, 0, 1024)
 
 	for {
-		bytesRead, err := f.Read(fileBuffer)
+		n, err := f.Read(buf)
 		if err == io.EOF {
 			break
 		}
@@ -95,23 +97,24 @@ func main() {
 			panic(err)
 		}
 
-		chunk := append(leftover, fileBuffer[:bytesRead]...)
-		lastNewLine := bytes.LastIndexByte(chunk, '\n')
-		if lastNewLine == -1 {
-			leftover = chunk
+		chunk := append(leftover, buf[:n]...)
+		lastNL := bytes.LastIndexByte(chunk, '\n')
+		if lastNL == -1 {
+			leftover = append(leftover[:0], chunk...)
 			continue
 		}
 
-		// Process lines up to the last newline
-		byteLines := chunk[:lastNewLine+1]
-		leftover = chunk[lastNewLine+1:]
+		byteLinesChan <- chunk[:lastNL+1]
+		leftover = append(leftover[:0], chunk[lastNL+1:]...)
+	}
 
-		byteLinesChan <- byteLines
+	if len(leftover) > 0 {
+		byteLinesChan <- leftover
 	}
 
 	close(byteLinesChan)
-
 	wg.Wait()
+	close(collectorChan)
 	readWg.Wait()
 	memFile, _ := os.Create("mem.prof")
 	pprof.WriteHeapProfile(memFile)
@@ -121,27 +124,31 @@ func main() {
 func processData(byteChan <-chan []byte, tempChan chan<- map[string]*Calculation, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	for byteLines := range byteChan {
-		orderedCities := make([]string, 0, 1024)
-		cityWeatherMap := make(map[string]*Calculation, 1024)
-		var byteLine []byte
-		var cityStr string
+	for chunk := range byteChan {
+		cityWeatherMap := make(map[string]*Calculation, 128)
 
-		// Process each line
 		start := 0
-		for i := 0; i < len(byteLines); i++ {
-			if byteLines[i] == 10 { // newline found
-				byteLine = byteLines[start:i]
-				start = i + 1
+		for i := 0; i < len(chunk); i++ {
+			if chunk[i] == '\n' {
+				line := chunk[start:i]
+				cityEnd, temp := parseBytes(line)
 
-				index, temp := parseBytes(byteLine)
+				// Zero-allocation string conversion
+				cityStr := *(*string)(unsafe.Pointer(&struct {
+					Data uintptr
+					Len  int
+				}{
+					Data: uintptr(unsafe.Pointer(&line[0])),
+					Len:  cityEnd,
+				}))
 
-				cityStr = string(byteLine[:index])
-				calc, ok := cityWeatherMap[cityStr]
-				if !ok {
-					calc = &Calculation{Min: temp, Max: temp, Total: temp, Count: 1}
-					cityWeatherMap[cityStr] = calc
-					orderedCities = append(orderedCities, cityStr)
+				if calc, ok := cityWeatherMap[cityStr]; !ok {
+					cityWeatherMap[cityStr] = &Calculation{
+						Min:   temp,
+						Max:   temp,
+						Total: temp,
+						Count: 1,
+					}
 				} else {
 					if temp < calc.Min {
 						calc.Min = temp
@@ -152,6 +159,7 @@ func processData(byteChan <-chan []byte, tempChan chan<- map[string]*Calculation
 					calc.Total += temp
 					calc.Count++
 				}
+				start = i + 1
 			}
 		}
 		tempChan <- cityWeatherMap
