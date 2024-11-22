@@ -122,6 +122,7 @@ func main() {
 }
 
 func processData(byteChan <-chan []byte, tempChan chan<- map[string]*Calculation, wg *sync.WaitGroup) {
+
 	defer wg.Done()
 
 	for chunk := range byteChan {
@@ -134,13 +135,7 @@ func processData(byteChan <-chan []byte, tempChan chan<- map[string]*Calculation
 				cityEnd, temp := parseBytes(line)
 
 				// Zero-allocation string conversion
-				cityStr := *(*string)(unsafe.Pointer(&struct {
-					Data uintptr
-					Len  int
-				}{
-					Data: uintptr(unsafe.Pointer(&line[0])),
-					Len:  cityEnd,
-				}))
+				cityStr := unsafe.String(unsafe.SliceData(line), cityEnd)
 
 				if calc, ok := cityWeatherMap[cityStr]; !ok {
 					cityWeatherMap[cityStr] = &Calculation{

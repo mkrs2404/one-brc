@@ -3,3 +3,5 @@ measurements*.txt
 simplest
 claude
 optimize*
+nofloat
+parallel
